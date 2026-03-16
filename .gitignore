@@ -1,0 +1,29 @@
+# ── Credenciales y secretos ───────────────────────────────────────────────────
+service_account.json
+.env
+.env.*
+*.key
+.streamlit/secrets.toml
+
+# ── Datos locales ─────────────────────────────────────────────────────────────
+finance_local.db
+finance_local.db-shm
+finance_local.db-wal
+
+# ── PDFs de cartolas (datos personales) ──────────────────────────────────────
+estados_de_cuenta/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+debug_pdf.py
+abrir_dashboard.bat
