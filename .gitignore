@@ -27,3 +27,6 @@ Thumbs.db
 *.log
 debug_pdf.py
 abrir_dashboard.bat
+
+# ── Scripts locales (contienen credenciales hardcodeadas) ────────────────────
+main.py

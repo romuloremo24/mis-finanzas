@@ -9,19 +9,19 @@ Ejecución:
 """
 import streamlit as st
 
-from utils.config import C_BG, C_CARD, C_BORDER
+from utils.config import C_CARD
 from utils.loaders import load_transactions
 from utils.sheets import init_sheets_tabs
 from utils.ui import GLOBAL_CSS
 
-from pages.p_dashboard       import render as page_dashboard
-from pages.p_transacciones   import render as page_transacciones
-from pages.p_gastos_manuales import render as page_gastos_manuales
-from pages.p_deudas          import render as page_deudas
-from pages.p_historico       import render as page_historico
-from pages.p_analisis        import render as page_analisis
-from pages.p_importar        import render as page_importar
-from pages.p_categorias      import render as page_categorias
+from views.p_dashboard       import render as page_dashboard
+from views.p_transacciones   import render as page_transacciones
+from views.p_gastos_manuales import render as page_gastos_manuales
+from views.p_deudas          import render as page_deudas
+from views.p_historico       import render as page_historico
+from views.p_analisis        import render as page_analisis
+from views.p_importar        import render as page_importar
+from views.p_categorias      import render as page_categorias
 
 
 PAGES = {
