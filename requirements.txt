@@ -4,3 +4,4 @@ google-auth-httplib2>=0.1,<1
 streamlit>=1.35,<1.45
 plotly>=5.0,<7
 pandas>=2.0,<3
+openpyxl>=3.0,<4
