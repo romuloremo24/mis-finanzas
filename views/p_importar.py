@@ -1,14 +1,18 @@
-"""Pagina: Importacion de cartolas bancarias desde CSV o Excel."""
+"""Pagina: Importacion de cartolas bancarias desde CSV, Excel o PDF."""
 from datetime import datetime
+from pathlib import Path
 import io
+import os
 
 import pandas as pd
 import streamlit as st
 
 from utils.categorias import categorize, parse_clp_amount
-from utils.config import CATEGORIES, ACCOUNT_TYPES, C_CARD, C_BORDER
+from utils.config import CATEGORIES, ACCOUNT_TYPES, C_CARD, C_BORDER, BASE_DIR
 from utils.loaders import load_transactions, load_reglas_categorias, load_documentos
 from utils.sheets import _append_rows, _append_row, _new_id
+
+ESTADOS_DIR = BASE_DIR / "estados_de_cuenta"
 
 # ── Presets de bancos (columnas del CSV de descarga web) ──────────────────────
 BANK_PRESETS = {
@@ -117,17 +121,60 @@ def _determine_doc_status(fecha_desde: str, existing_docs: pd.DataFrame) -> str:
     return "nuevo"
 
 
+def _save_pdf_locally(uploaded, banco: str) -> str | None:
+    """Guarda el PDF subido en estados_de_cuenta/{banco}/ y retorna la ruta."""
+    folder_map = {
+        "BCI": "Lider_BCI",
+        "Lider BCI": "Lider_BCI",
+        "Santander": "Santander",
+    }
+    folder_name = folder_map.get(banco, banco.replace(" ", "_"))
+    dest_dir = ESTADOS_DIR / folder_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / uploaded.name
+    dest_path.write_bytes(uploaded.getvalue())
+    return str(dest_path)
+
+
+def _parse_pdf(uploaded, banco: str, password: str = "") -> list[dict]:
+    """Parsea un PDF bancario usando el modulo pdf_parser."""
+    try:
+        from utils.pdf_parser import parse_pdf_file
+    except ImportError:
+        st.error("pdfplumber no esta instalado. Ejecuta: pip install pdfplumber")
+        return []
+
+    # Guardar temporalmente para parsear
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(uploaded.getvalue())
+        tmp_path = tmp.name
+
+    try:
+        return parse_pdf_file(tmp_path, banco=banco, password=password)
+    finally:
+        os.unlink(tmp_path)
+
+
 def render():
     st.title("📂 Importar Cartola")
-    st.caption("Sube un CSV o Excel descargado desde tu banco y lo importamos a Transacciones.")
+    st.caption("Sube un CSV, Excel o **PDF** de tu banco y lo importamos a Transacciones.")
 
     # ── Paso 1: subir archivo ─────────────────────────────────────────────────
-    uploaded = st.file_uploader("Selecciona el archivo", type=["csv", "xlsx", "xls"])
+    uploaded = st.file_uploader("Selecciona el archivo", type=["csv", "xlsx", "xls", "pdf"])
     if uploaded is None:
-        st.info("Sube un archivo CSV o Excel de tu banco para comenzar.")
+        st.info("Sube un archivo CSV, Excel o PDF de tu banco para comenzar.")
         _show_recent_imports()
         return
 
+    is_pdf = uploaded.name.lower().endswith(".pdf")
+
+    # ── Flujo PDF ─────────────────────────────────────────────────────────────
+    if is_pdf:
+        _render_pdf_flow(uploaded)
+        return
+
+    # ── Flujo CSV/Excel ───────────────────────────────────────────────────────
     raw_df = _load_file(uploaded)
     if raw_df is None or raw_df.empty:
         return
@@ -430,6 +477,170 @@ def render():
 
             st.cache_data.clear()
             st.success(f"🎉 {len(rows)} transacciones importadas y documento registrado exitosamente.")
+            st.balloons()
+        except Exception as e:
+            st.error(f"Error al importar: {e}")
+
+
+def _render_pdf_flow(uploaded):
+    """Flujo de importacion para archivos PDF bancarios."""
+    st.success(f"PDF cargado: **{uploaded.name}**")
+
+    st.subheader("Configurar banco")
+    col_b, col_p = st.columns(2)
+    banco = col_b.selectbox("Banco", ["Lider BCI", "Santander", "Otro"], key="pdf_banco")
+    password = col_p.text_input("Contraseña del PDF (si tiene)", type="password", key="pdf_pass")
+
+    # Opcion para guardar localmente
+    save_local = st.checkbox(
+        "Guardar PDF en carpeta local (estados_de_cuenta/)",
+        value=True,
+        help="Guarda una copia en tu PC para tener respaldo organizado por banco"
+    )
+
+    if not st.button("🔄 Extraer transacciones del PDF", type="primary"):
+        return
+
+    with st.spinner("Extrayendo transacciones del PDF..."):
+        transactions = _parse_pdf(uploaded, banco, password)
+
+    if not transactions:
+        st.error(
+            "No se pudieron extraer transacciones del PDF. "
+            "Verifica que el banco es correcto y la contraseña (si aplica)."
+        )
+        st.caption("Bancos soportados: Lider BCI, Santander (CC, TC CLP, TC USD)")
+        return
+
+    # Guardar PDF localmente si se pidio
+    saved_path = None
+    if save_local:
+        saved_path = _save_pdf_locally(uploaded, banco)
+        if saved_path:
+            st.caption(f"PDF guardado en: `{saved_path}`")
+
+    # Convertir a DataFrame
+    proc_df = pd.DataFrame([{
+        "fecha": t["date"],
+        "banco": t["bank"],
+        "cuenta": t["account_type"],
+        "moneda": t.get("currency", "CLP"),
+        "tipo": t["tx_type"],
+        "descripcion": t["description"],
+        "categoria": t["category"],
+        "monto": t["amount"],
+    } for t in transactions])
+
+    # Calcular metadata
+    proc_df["_fecha_dt"] = pd.to_datetime(proc_df["fecha"])
+    fecha_desde = proc_df["_fecha_dt"].min()
+    fecha_hasta = proc_df["_fecha_dt"].max()
+    periodo = fecha_desde.strftime("%Y-%m")
+    cuenta = proc_df["cuenta"].iloc[0] if not proc_df.empty else ""
+    moneda = proc_df["moneda"].iloc[0] if not proc_df.empty else "CLP"
+    tipo_cuenta = ACCOUNT_TYPES.get(cuenta, cuenta)
+
+    if fecha_desde.month != fecha_hasta.month or fecha_desde.year != fecha_hasta.year:
+        periodo = f"{fecha_desde.strftime('%Y-%m')} a {fecha_hasta.strftime('%Y-%m')}"
+
+    # Detectar documento existente
+    existing_docs = _detect_existing_docs(banco, cuenta, periodo)
+    doc_status = _determine_doc_status(proc_df["fecha"].min(), existing_docs)
+
+    if doc_status == "reimportado":
+        st.warning(f"⚠️ Ya existe una cartola de **{banco} {cuenta}** para **{periodo}**. Se marcara como reimportado.")
+    elif doc_status == "antiguo":
+        st.info(f"📋 Cartola antigua detectada — periodo **{periodo}**.")
+
+    st.success(f"✅ {len(proc_df)} transacciones extraidas del PDF")
+
+    # Resumen
+    st.markdown(f"""
+    <div style="background:{C_CARD};border:1px solid {C_BORDER};border-radius:10px;padding:16px;margin:8px 0">
+        <div style="display:flex;gap:24px;flex-wrap:wrap">
+            <div><span style="color:#888;font-size:11px">BANCO</span><br><b style="color:#fff">{banco}</b></div>
+            <div><span style="color:#888;font-size:11px">CUENTA</span><br><b style="color:#fff">{cuenta}</b></div>
+            <div><span style="color:#888;font-size:11px">TIPO</span><br><b style="color:#fff">{tipo_cuenta}</b></div>
+            <div><span style="color:#888;font-size:11px">PERIODO</span><br><b style="color:#fff">{periodo}</b></div>
+            <div><span style="color:#888;font-size:11px">RANGO</span><br><b style="color:#fff">{fecha_desde.strftime('%d/%m/%Y')} → {fecha_hasta.strftime('%d/%m/%Y')}</b></div>
+            <div><span style="color:#888;font-size:11px">TRANSACCIONES</span><br><b style="color:#fff">{len(proc_df)}</b></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Deduplicacion
+    exist_df = load_transactions()
+    n_dupes = 0
+    if not exist_df.empty:
+        exist_keys = set(
+            exist_df["fecha"].dt.strftime("%Y-%m-%d") + "|" +
+            exist_df["descripcion"].astype(str) + "|" +
+            exist_df["monto"].astype(str)
+        )
+        proc_df["_dup"] = proc_df.apply(
+            lambda r: f"{r['fecha']}|{r['descripcion']}|{r['monto']}" in exist_keys, axis=1
+        )
+        n_dupes = proc_df["_dup"].sum()
+    else:
+        proc_df["_dup"] = False
+
+    if n_dupes:
+        st.warning(f"⚠️ {n_dupes} duplicados detectados.")
+
+    # Preview
+    st.subheader("Vista previa")
+    disp = proc_df.copy()
+    disp["tipo_icon"] = disp["tipo"].apply(lambda t: "🟢" if t == "Ingreso" else "🔴")
+    disp["monto_fmt"] = disp["monto"].apply(lambda v: f"${v:,.0f}")
+    st.dataframe(
+        disp[["fecha", "descripcion", "categoria", "tipo_icon", "monto_fmt", "_dup"]].rename(columns={
+            "fecha": "Fecha", "descripcion": "Descripcion", "categoria": "Categoria",
+            "tipo_icon": "Tipo", "monto_fmt": "Monto", "_dup": "Duplicado"
+        }),
+        hide_index=True, use_container_width=True, height=350,
+    )
+
+    # Importar
+    st.markdown("---")
+    only_new = st.checkbox("Importar solo filas nuevas (excluir duplicados)", value=True, key="pdf_only_new")
+
+    if st.button("⬆️ Importar a Google Sheets", type="primary", key="pdf_import"):
+        final_df = proc_df[~proc_df["_dup"]] if only_new else proc_df.copy()
+        if final_df.empty:
+            st.warning("No hay filas nuevas para importar.")
+            return
+
+        rows = [
+            [row["fecha"], row["banco"], row["cuenta"], row["moneda"],
+             row["tipo"], row["descripcion"], row["categoria"], row["monto"]]
+            for _, row in final_df.iterrows()
+        ]
+        try:
+            _append_rows("Transacciones", rows)
+
+            total_gastos = final_df[final_df["tipo"] == "Gasto"]["monto"].sum()
+            total_ingresos = final_df[final_df["tipo"] == "Ingreso"]["monto"].sum()
+            doc_row = [
+                _new_id(),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                uploaded.name,
+                banco,
+                cuenta,
+                tipo_cuenta,
+                moneda,
+                periodo,
+                fecha_desde.strftime("%Y-%m-%d"),
+                fecha_hasta.strftime("%Y-%m-%d"),
+                len(final_df),
+                round(total_gastos),
+                round(total_ingresos),
+                doc_status,
+                f"PDF {'guardado' if saved_path else 'no guardado'} localmente",
+            ]
+            _append_row("Documentos_Cargados", doc_row)
+
+            st.cache_data.clear()
+            st.success(f"🎉 {len(rows)} transacciones importadas desde PDF.")
             st.balloons()
         except Exception as e:
             st.error(f"Error al importar: {e}")

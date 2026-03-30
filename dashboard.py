@@ -23,6 +23,7 @@ from views.p_analisis        import render as page_analisis
 from views.p_importar        import render as page_importar
 from views.p_categorias      import render as page_categorias
 from views.p_documentos      import render as page_documentos
+from views.p_splitwise       import render as page_splitwise
 
 
 PAGES = {
@@ -32,6 +33,7 @@ PAGES = {
     "📊  Deudas & Pendientes":    page_deudas,
     "📈  Histórico":              page_historico,
     "🤖  Análisis & Presupuesto": page_analisis,
+    "🔗  Splitwise":              page_splitwise,
     "📂  Importar Cartola":       page_importar,
     "📋  Documentos Cargados":    page_documentos,
     "🏷️   Categorías & Reglas":   page_categorias,
