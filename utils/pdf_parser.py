@@ -61,15 +61,15 @@ def parse_pdf_file(path: str | Path, banco: str = "", password: str = "") -> lis
             if "lider" in banco.lower() or "bci" in banco.lower():
                 transactions = _parse_lider_bci(pdf, banco, account_type)
             elif "santander" in banco.lower():
-                fname = path.name.upper()
-                if fname.startswith("80_15358"):
+                # Detectar formato por contenido del PDF
+                fmt = _detect_santander_format(pdf)
+                if fmt == "tc_cl":
                     transactions = _parse_santander_tc_cl(pdf, banco, account_type)
-                elif fname.startswith("80_15356"):
+                elif fmt == "tc_usd":
                     transactions = _parse_santander_tc_usd(pdf, banco, account_type)
                 else:
                     transactions = _parse_santander(pdf, banco, account_type)
             else:
-                # Intentar detectar por contenido
                 transactions = _parse_generic(pdf, banco, account_type)
     except Exception:
         pass
@@ -85,6 +85,18 @@ def _detect_bank(path: Path) -> str:
     if "santander" in parent or "santander" in name:
         return "Santander"
     return "Banco"
+
+
+def _detect_santander_format(pdf) -> str:
+    """Detecta el formato de un PDF Santander por contenido."""
+    text = ""
+    for page in pdf.pages[:2]:
+        text += (page.extract_text() or "").upper()
+    if "ESTADO DE CUENTA INTERNACIONAL" in text or "MONTO US$" in text:
+        return "tc_usd"
+    if "PERIODO ACTUAL" in text or "VALOR CUOTA MENSUAL" in text:
+        return "tc_cl"
+    return "cc"  # cuenta corriente / generico
 
 
 def _parse_lider_bci(pdf, bank, account_type):
@@ -255,6 +267,17 @@ def _parse_santander_tc_cl(pdf, bank, account_type):
 def _parse_santander_tc_usd(pdf, bank, account_type):
     transactions = []
     SKIP_FIRST = {"1. TOTAL OPERACIONES", "MOVIMIENTOS TARJETA", "3. CARGOS"}
+
+    # Extraer año del periodo facturado buscando en todas las tablas
+    year = str(datetime.now().year)
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+        # Buscar "PERÍODO FACTURADO HASTA DD/MM/YYYY" o similar
+        m = re.search(r"(\d{2}/\d{2}/\d{4})", text)
+        if m:
+            year = m.group(1)[-4:]
+            break
+
     for page in pdf.pages:
         for table in page.extract_tables():
             if not table or len(table) < 2:
@@ -280,6 +303,8 @@ def _parse_santander_tc_usd(pdf, bank, account_type):
                     if not desc:
                         continue
                     fecha_s = fechas[i] if i < len(fechas) else ""
+                    # Completar fechas truncadas (DD/MM/ sin año)
+                    fecha_s = _complete_date(fecha_s, year)
                     date = _parse_date(fecha_s)
                     if not date:
                         continue
@@ -353,6 +378,16 @@ def _parse_date_santander(raw, year):
     if re.match(r"^\d{2}/\d{2}$", raw):
         return _parse_date(f"{raw}/{year}")
     return _parse_date(raw)
+
+
+def _complete_date(raw: str, year: str) -> str:
+    """Completa fechas truncadas: 'DD/MM/' -> 'DD/MM/YYYY', 'DD/MM' -> 'DD/MM/YYYY'."""
+    raw = raw.strip()
+    if re.match(r"^\d{2}/\d{2}/$", raw):
+        return raw + year
+    if re.match(r"^\d{2}/\d{2}$", raw):
+        return raw + "/" + year
+    return raw
 
 
 def _parse_date(raw):

@@ -97,7 +97,10 @@ def render():
     disp["n_tx"] = disp["num_transacciones"].astype(int)
 
     # Estado con iconos
-    status_map = {"nuevo": "🟢 Nuevo", "antiguo": "🟠 Antiguo", "reimportado": "🔵 Reimportado", "reconstruido": "⚙️ Reconstruido"}
+    status_map = {
+        "nuevo": "🟢 Nuevo", "antiguo": "🟠 Antiguo", "reimportado": "🔵 Reimportado",
+        "reconstruido": "⚙️ Reconstruido", "en_carpeta": "📁 En carpeta", "error_parseo": "❌ Error",
+    }
     disp["estado_fmt"] = disp["estado"].map(status_map).fillna(disp["estado"])
 
     show_cols = {
@@ -257,57 +260,130 @@ def _render_gaps(docs: pd.DataFrame):
 
 
 def _rebuild_docs_from_transactions(df_tx: pd.DataFrame) -> int:
-    """Reconstruye Documentos_Cargados a partir de transacciones existentes agrupadas por banco+cuenta+mes."""
+    """Reconstruye Documentos_Cargados desde transacciones existentes + PDFs en carpeta."""
+    import os
     from pathlib import Path
     from utils.config import BASE_DIR
+    from utils.sheets import _append_rows
 
-    groups = df_tx.groupby(["banco", "cuenta", "mes"])
     rows = []
     pdf_dir = BASE_DIR / "estados_de_cuenta"
+    registered_keys = set()  # (banco, cuenta, mes) ya registrados
 
-    for (banco, cuenta, mes), grp in groups:
-        gastos_mask = grp["es_gasto"]
-        total_gastos = grp.loc[gastos_mask, "monto"].sum()
-        total_ingresos = grp.loc[~gastos_mask, "monto"].sum()
-        fecha_min = grp["fecha"].min()
-        fecha_max = grp["fecha"].max()
-        moneda = grp["moneda"].mode().iloc[0] if not grp["moneda"].mode().empty else "CLP"
-        tipo_cuenta = _tipo_cuenta(cuenta)
+    # ── Paso 1: registrar desde transacciones en Sheets ──────────────────────
+    if not df_tx.empty:
+        groups = df_tx.groupby(["banco", "cuenta", "mes"])
+        for (banco, cuenta, mes), grp in groups:
+            gastos_mask = grp["es_gasto"]
+            total_gastos = grp.loc[gastos_mask, "monto"].sum()
+            total_ingresos = grp.loc[~gastos_mask, "monto"].sum()
+            fecha_min = grp["fecha"].min()
+            fecha_max = grp["fecha"].max()
+            moneda = grp["moneda"].mode().iloc[0] if not grp["moneda"].mode().empty else "CLP"
+            tipo_cuenta = _tipo_cuenta(cuenta)
 
-        # Intentar encontrar PDF correspondiente
-        archivo = f"{banco}_{cuenta}_{mes}.pdf"
-        if pdf_dir.exists():
-            for subfolder in pdf_dir.iterdir():
-                if subfolder.is_dir():
-                    for pdf in subfolder.glob("*.pdf"):
-                        pdf_name = pdf.name.lower()
-                        if mes.replace("-", "") in pdf_name or mes in pdf_name:
-                            archivo = pdf.name
-                            break
+            archivo = _find_pdf_for_period(pdf_dir, banco, mes)
 
-        rows.append([
-            _new_id(),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            archivo,
-            banco,
-            cuenta,
-            tipo_cuenta,
-            moneda,
-            mes,
-            fecha_min.strftime("%Y-%m-%d"),
-            fecha_max.strftime("%Y-%m-%d"),
-            len(grp),
-            round(total_gastos),
-            round(total_ingresos),
-            "reconstruido",
-            "Generado automaticamente desde transacciones existentes",
-        ])
+            rows.append([
+                _new_id(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                archivo, banco, cuenta, tipo_cuenta, moneda, mes,
+                fecha_min.strftime("%Y-%m-%d"), fecha_max.strftime("%Y-%m-%d"),
+                len(grp), round(total_gastos), round(total_ingresos),
+                "reconstruido", "Desde transacciones existentes",
+            ])
+            registered_keys.add((banco, cuenta, mes))
+
+    # ── Paso 2: escanear PDFs en carpeta que no estan en Sheets ──────────────
+    if pdf_dir.exists():
+        try:
+            from utils.pdf_parser import parse_pdf_file
+            can_parse = True
+        except ImportError:
+            can_parse = False
+
+        for subfolder in sorted(pdf_dir.iterdir()):
+            if not subfolder.is_dir():
+                continue
+            for pdf_path in sorted(subfolder.glob("*.pdf")):
+                # Intentar parsear para obtener metadata
+                if not can_parse:
+                    # Sin pdfplumber, registrar solo el archivo sin datos
+                    banco = _folder_to_bank(subfolder.name)
+                    rows.append([
+                        _new_id(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        pdf_path.name, banco, "", "", "CLP", "",
+                        "", "", 0, 0, 0,
+                        "en_carpeta", "PDF en carpeta, no parseado (falta pdfplumber)",
+                    ])
+                    continue
+
+                banco = _folder_to_bank(subfolder.name)
+                password = os.environ.get(
+                    "BCI_PDF_PASSWORD" if "bci" in subfolder.name.lower() else "SANTANDER_PDF_PASSWORD", ""
+                )
+
+                try:
+                    txs = parse_pdf_file(pdf_path, banco=banco, password=password)
+                except Exception:
+                    txs = []
+
+                if not txs:
+                    # PDF no parseable — registrar como archivo sin datos
+                    rows.append([
+                        _new_id(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        pdf_path.name, banco, "", "", "CLP", "",
+                        "", "", 0, 0, 0,
+                        "error_parseo", f"No se pudo extraer transacciones de {pdf_path.name}",
+                    ])
+                    continue
+
+                # Agrupar transacciones del PDF por cuenta+mes
+                import pandas as pd
+                tx_df = pd.DataFrame(txs)
+                tx_df["date_dt"] = pd.to_datetime(tx_df["date"])
+                tx_df["mes"] = tx_df["date_dt"].dt.strftime("%Y-%m")
+
+                for (acct, mes), grp in tx_df.groupby(["account_type", "mes"]):
+                    key = (banco, acct, mes)
+                    if key in registered_keys:
+                        continue  # ya registrado desde Sheets
+
+                    gastos = grp[grp["tx_type"] == "Gasto"]["amount"].sum()
+                    ingresos = grp[grp["tx_type"] == "Ingreso"]["amount"].sum()
+                    moneda = grp["currency"].mode().iloc[0] if not grp["currency"].mode().empty else "CLP"
+
+                    rows.append([
+                        _new_id(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        pdf_path.name, banco, acct, _tipo_cuenta(acct), moneda, mes,
+                        grp["date_dt"].min().strftime("%Y-%m-%d"),
+                        grp["date_dt"].max().strftime("%Y-%m-%d"),
+                        len(grp), round(gastos), round(ingresos),
+                        "en_carpeta", "PDF en carpeta, no importado a Sheets",
+                    ])
+                    registered_keys.add(key)
 
     if rows:
-        from utils.sheets import _append_rows
         _append_rows("Documentos_Cargados", rows)
 
     return len(rows)
+
+
+def _folder_to_bank(folder_name: str) -> str:
+    mapping = {"lider_bci": "Lider BCI", "santander": "Santander"}
+    return mapping.get(folder_name.lower(), folder_name)
+
+
+def _find_pdf_for_period(pdf_dir, banco: str, mes: str) -> str:
+    """Busca un PDF en la carpeta que corresponda al periodo."""
+    if not pdf_dir.exists():
+        return f"{banco}_{mes}.pdf"
+    bank_folder = {"Lider BCI": "Lider_BCI", "Santander": "Santander"}.get(banco, banco)
+    folder = pdf_dir / bank_folder
+    if folder.exists():
+        for pdf in folder.glob("*.pdf"):
+            # No hay forma segura de matchear por nombre, listar todos
+            pass
+    return f"{banco}_{mes}.pdf"
 
 
 def _render_coverage_from_transactions(df_tx: pd.DataFrame):
