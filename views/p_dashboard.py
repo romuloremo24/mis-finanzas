@@ -47,7 +47,7 @@ def render():
     kpi_card(c3, "Balance",  fmt_clp(b), delta_str(b, bp),
              C_GREEN if b >= 0 else C_RED, "=")
     kpi_card(c4, "Ahorro",   f"{a:.1f}%", delta_str(a, ap), C_PURPLE, "💰")
-    kpi_card(c5, "Sueldo",   fmt_clp(s), "",                C_GOLD,   "🏦")
+    kpi_card(c5, "Ingreso fijo", fmt_clp(s), "",             C_GOLD,   "🏦")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
