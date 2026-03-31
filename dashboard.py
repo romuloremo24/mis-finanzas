@@ -2,11 +2,15 @@
 Finance Dashboard — Streamlit
 ──────────────────────────────────────────────────────────────────────────────
 Plataforma de finanzas personales: visualiza cartolas, registra gastos,
-gestiona deudas, importa archivos CSV/Excel y administra categorías.
+gestiona deudas, importa archivos CSV/Excel/PDF y administra categorías.
 
 Ejecución:
   streamlit run dashboard.py
 """
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent.parent / "1. Config" / ".env")
+
 import streamlit as st
 
 from utils.config import C_CARD, C_BORDER
