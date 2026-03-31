@@ -40,8 +40,23 @@ def render():
     st.markdown("<br>", unsafe_allow_html=True)
 
     if docs.empty:
-        st.info("No hay documentos registrados. Importa cartolas desde **📂 Importar Cartola** para comenzar a trackear.")
-        _render_coverage_from_transactions(df_tx)
+        st.info("No hay documentos registrados aun.")
+        if not df_tx.empty:
+            st.markdown("---")
+            st.subheader("🔄 Reconstruir registro desde datos existentes")
+            st.caption(
+                "Tienes transacciones importadas pero sin registro de documentos. "
+                "Puedo reconstruir el registro analizando las transacciones y los PDFs en carpeta."
+            )
+            if st.button("🔄 Reconstruir registro de documentos", type="primary"):
+                n = _rebuild_docs_from_transactions(df_tx)
+                if n > 0:
+                    st.success(f"🎉 {n} documentos registrados automaticamente.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.warning("No se pudieron generar registros.")
+            _render_coverage_from_transactions(df_tx)
         return
 
     # ── Filtros ───────────────────────────────────────────────────────────────
@@ -82,7 +97,7 @@ def render():
     disp["n_tx"] = disp["num_transacciones"].astype(int)
 
     # Estado con iconos
-    status_map = {"nuevo": "🟢 Nuevo", "antiguo": "🟠 Antiguo", "reimportado": "🔵 Reimportado"}
+    status_map = {"nuevo": "🟢 Nuevo", "antiguo": "🟠 Antiguo", "reimportado": "🔵 Reimportado", "reconstruido": "⚙️ Reconstruido"}
     disp["estado_fmt"] = disp["estado"].map(status_map).fillna(disp["estado"])
 
     show_cols = {
@@ -239,6 +254,60 @@ def _render_gaps(docs: pd.DataFrame):
         )
     else:
         st.success("Sin brechas detectadas en la cobertura de periodos.")
+
+
+def _rebuild_docs_from_transactions(df_tx: pd.DataFrame) -> int:
+    """Reconstruye Documentos_Cargados a partir de transacciones existentes agrupadas por banco+cuenta+mes."""
+    from pathlib import Path
+    from utils.config import BASE_DIR
+
+    groups = df_tx.groupby(["banco", "cuenta", "mes"])
+    rows = []
+    pdf_dir = BASE_DIR / "estados_de_cuenta"
+
+    for (banco, cuenta, mes), grp in groups:
+        gastos_mask = grp["es_gasto"]
+        total_gastos = grp.loc[gastos_mask, "monto"].sum()
+        total_ingresos = grp.loc[~gastos_mask, "monto"].sum()
+        fecha_min = grp["fecha"].min()
+        fecha_max = grp["fecha"].max()
+        moneda = grp["moneda"].mode().iloc[0] if not grp["moneda"].mode().empty else "CLP"
+        tipo_cuenta = _tipo_cuenta(cuenta)
+
+        # Intentar encontrar PDF correspondiente
+        archivo = f"{banco}_{cuenta}_{mes}.pdf"
+        if pdf_dir.exists():
+            for subfolder in pdf_dir.iterdir():
+                if subfolder.is_dir():
+                    for pdf in subfolder.glob("*.pdf"):
+                        pdf_name = pdf.name.lower()
+                        if mes.replace("-", "") in pdf_name or mes in pdf_name:
+                            archivo = pdf.name
+                            break
+
+        rows.append([
+            _new_id(),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            archivo,
+            banco,
+            cuenta,
+            tipo_cuenta,
+            moneda,
+            mes,
+            fecha_min.strftime("%Y-%m-%d"),
+            fecha_max.strftime("%Y-%m-%d"),
+            len(grp),
+            round(total_gastos),
+            round(total_ingresos),
+            "reconstruido",
+            "Generado automaticamente desde transacciones existentes",
+        ])
+
+    if rows:
+        from utils.sheets import _append_rows
+        _append_rows("Documentos_Cargados", rows)
+
+    return len(rows)
 
 
 def _render_coverage_from_transactions(df_tx: pd.DataFrame):
